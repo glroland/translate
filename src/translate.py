@@ -157,6 +157,15 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
+def _try_parse_json(s: str) -> dict | list | None:
+    """Return the parsed object if s is a JSON object or array string, else None."""
+    try:
+        parsed = json.loads(s)
+        return parsed if isinstance(parsed, (dict, list)) else None
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Translation calls
 # ---------------------------------------------------------------------------
@@ -252,11 +261,27 @@ def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int
     if not paths_values:
         return result, 0
 
-    batches = _batch_paths(paths_values, max_chars)
+    total_retries = 0
+
+    # Split: values that are themselves JSON objects/arrays are translated recursively;
+    # plain strings go into the normal batching pipeline.
+    embedded = [(path, value, _try_parse_json(value)) for path, value in paths_values]
+    json_paths = [(path, value, parsed) for path, value, parsed in embedded if parsed is not None]
+    regular = [(path, value) for path, value, parsed in embedded if parsed is None]
+
+    for path, _, parsed in json_paths:
+        click.echo(f"  Translating embedded JSON at path {path}…", err=True)
+        translated_inner, r = translate_json(client, model, parsed, max_chars, source_lang, target_lang, retries, field=None)
+        total_retries += r
+        _set_path(result, path, json.dumps(translated_inner, ensure_ascii=False))
+
+    if not regular:
+        return result, total_retries
+
+    batches = _batch_paths(regular, max_chars)
     system = _json_system_prompt(target_lang, source_lang)
     expected_lang = _lang_code(target_lang)
-    total_retries = 0
-    click.echo(f"  Translating {len(paths_values)} strings in {len(batches)} batch(es)…", err=True)
+    click.echo(f"  Translating {len(regular)} strings in {len(batches)} batch(es)…", err=True)
 
     for i, batch in enumerate(batches, 1):
         click.echo(f"  Batch {i}/{len(batches)}…", err=True)
