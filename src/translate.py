@@ -233,14 +233,15 @@ def _translate_with_retry(
     return result, retries_used
 
 
-def translate_markdown(client: OpenAI, model: str, content: str, max_chars: int, source_lang: str | None, target_lang: str, retries: int = 0) -> tuple[str, int]:
+def translate_markdown(client: OpenAI, model: str, content: str, max_chars: int, target_lang: str, retries: int = 0) -> tuple[str, int]:
     chunks = split_markdown(content, max_chars)
     translated: list[str] = []
-    system = _markdown_system_prompt(target_lang, source_lang)
     expected_lang = _lang_code(target_lang)
     total_retries = 0
     for i, chunk in enumerate(chunks, 1):
-        click.echo(f"  Translating chunk {i}/{len(chunks)} ({len(chunk)} chars)…", err=True)
+        chunk_lang = _detect_source_lang(chunk) if len(chunk) >= _MIN_DETECT_LEN else None
+        system = _markdown_system_prompt(target_lang, chunk_lang)
+        click.echo(f"  Translating chunk {i}/{len(chunks)} ({len(chunk)} chars, detected: {chunk_lang or 'unknown'})…", err=True)
         result, retries_used = _translate_with_retry(client, model, system, chunk, expected_lang, retries, target_lang)
         total_retries += retries_used
         translated.append(result.strip())
@@ -254,7 +255,7 @@ def translate_markdown(client: OpenAI, model: str, content: str, max_chars: int,
     return joined, total_retries
 
 
-def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int, source_lang: str | None, target_lang: str, retries: int = 0, field: str | None = None) -> tuple[dict | list, int]:
+def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int, target_lang: str, retries: int = 0, field: str | None = None) -> tuple[dict | list, int]:
     result = copy.deepcopy(data)
     paths_values = list(_collect_paths(result, field=field))
 
@@ -271,7 +272,7 @@ def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int
 
     for path, _, parsed in json_paths:
         click.echo(f"  Translating embedded JSON at path {path}…", err=True)
-        translated_inner, r = translate_json(client, model, parsed, max_chars, source_lang, target_lang, retries, field=None)
+        translated_inner, r = translate_json(client, model, parsed, max_chars, target_lang, retries, field=None)
         total_retries += r
         _set_path(result, path, json.dumps(translated_inner, ensure_ascii=False))
 
@@ -279,12 +280,14 @@ def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int
         return result, total_retries
 
     batches = _batch_paths(regular, max_chars)
-    system = _json_system_prompt(target_lang, source_lang)
     expected_lang = _lang_code(target_lang)
     click.echo(f"  Translating {len(regular)} strings in {len(batches)} batch(es)…", err=True)
 
     for i, batch in enumerate(batches, 1):
-        click.echo(f"  Batch {i}/{len(batches)}…", err=True)
+        batch_text = " ".join(value for _, value in batch)
+        batch_lang = _detect_source_lang(batch_text) if len(batch_text) >= _MIN_DETECT_LEN else None
+        system = _json_system_prompt(target_lang, batch_lang)
+        click.echo(f"  Batch {i}/{len(batches)} (detected: {batch_lang or 'unknown'})…", err=True)
         payload = {str(j): value for j, (_, value) in enumerate(batch)}
         user_content = json.dumps(payload, ensure_ascii=False)
 
@@ -385,19 +388,14 @@ def main(input, output, url, key, model, chunk_size, target_lang, retries, json_
 
     if suffix in {".md", ".markdown"}:
         content = input_path.read_text(encoding="utf-8")
-        source_lang = _detect_source_lang(content) if len(content) >= _MIN_DETECT_LEN else None
-        click.echo(f"Detected source language: {source_lang or 'unknown'}", err=True)
         click.echo(f"Translating markdown: {input_path} ({len(content)} chars) → {target_lang}", err=True)
-        translated, total_retries = translate_markdown(client, model, content, chunk_size, source_lang, target_lang, retries)
+        translated, total_retries = translate_markdown(client, model, content, chunk_size, target_lang, retries)
         output_path.write_text(translated + "\n", encoding="utf-8")
     else:
         content = input_path.read_text(encoding="utf-8")
         data = json.loads(content)
-        sample = " ".join(v for _, v in list(_collect_paths(data, field=json_field))[:100])
-        source_lang = _detect_source_lang(sample) if len(sample) >= _MIN_DETECT_LEN else None
-        click.echo(f"Detected source language: {source_lang or 'unknown'}", err=True)
         click.echo(f"Translating JSON: {input_path} → {target_lang}", err=True)
-        translated_data, total_retries = translate_json(client, model, data, chunk_size, source_lang, target_lang, retries, field=json_field)
+        translated_data, total_retries = translate_json(client, model, data, chunk_size, target_lang, retries, field=json_field)
         output_path.write_text(
             json.dumps(translated_data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
