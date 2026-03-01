@@ -120,7 +120,7 @@ def _collect_paths(obj, path=(), field: str | None = None):
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
             yield from _collect_paths(v, path + (i,), field)
-    elif isinstance(obj, str):
+    elif isinstance(obj, str) and obj:
         if field is None or (path and path[-1] == field):
             yield path, obj
 
