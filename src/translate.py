@@ -109,16 +109,20 @@ def _ensure_spacing(a: str, b: str) -> str:
 # JSON chunking
 # ---------------------------------------------------------------------------
 
-def _collect_paths(obj, path=()):
-    """Recursively yield (path_tuple, string_value) for all string leaves."""
+def _collect_paths(obj, path=(), field: str | None = None):
+    """Recursively yield (path_tuple, string_value) for string leaves.
+
+    If *field* is set, only yield leaves whose immediate dict key matches it.
+    """
     if isinstance(obj, dict):
         for k, v in obj.items():
-            yield from _collect_paths(v, path + (k,))
+            yield from _collect_paths(v, path + (k,), field)
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            yield from _collect_paths(v, path + (i,))
+            yield from _collect_paths(v, path + (i,), field)
     elif isinstance(obj, str):
-        yield path, obj
+        if field is None or (path and path[-1] == field):
+            yield path, obj
 
 
 def _set_path(obj, path, value):
@@ -241,9 +245,9 @@ def translate_markdown(client: OpenAI, model: str, content: str, max_chars: int,
     return joined, total_retries
 
 
-def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int, source_lang: str | None, target_lang: str, retries: int = 0) -> tuple[dict | list, int]:
+def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int, source_lang: str | None, target_lang: str, retries: int = 0, field: str | None = None) -> tuple[dict | list, int]:
     result = copy.deepcopy(data)
-    paths_values = list(_collect_paths(result))
+    paths_values = list(_collect_paths(result, field=field))
 
     if not paths_values:
         return result, 0
@@ -328,7 +332,8 @@ def _default_output(input_path: Path, target_lang: str) -> Path:
 @click.option("--chunk-size", default=2000, show_default=True, metavar="N", help="Max characters per chunk.")
 @click.option("--target-lang", default="English", show_default=True, help="Target language for translation.")
 @click.option("--retries", default=5, show_default=True, metavar="N", help="Max retries when translated chunk is detected in the wrong language.")
-def main(input, output, url, key, model, chunk_size, target_lang, retries):
+@click.option("--json-field", default="text", show_default=True, help="JSON key whose values are translated (other keys are left untouched).")
+def main(input, output, url, key, model, chunk_size, target_lang, retries, json_field):
     """Translate a Markdown or JSON file via an OpenAI-compatible LLM."""
     input_path = Path(input)
     output_path = Path(output) if output else _default_output(input_path, target_lang)
@@ -352,11 +357,11 @@ def main(input, output, url, key, model, chunk_size, target_lang, retries):
     else:
         content = input_path.read_text(encoding="utf-8")
         data = json.loads(content)
-        sample = " ".join(v for _, v in list(_collect_paths(data))[:100])
+        sample = " ".join(v for _, v in list(_collect_paths(data, field=json_field))[:100])
         source_lang = _detect_source_lang(sample) if len(sample) >= _MIN_DETECT_LEN else None
         click.echo(f"Detected source language: {source_lang or 'unknown'}", err=True)
         click.echo(f"Translating JSON: {input_path} → {target_lang}", err=True)
-        translated_data, total_retries = translate_json(client, model, data, chunk_size, source_lang, target_lang, retries)
+        translated_data, total_retries = translate_json(client, model, data, chunk_size, source_lang, target_lang, retries, field=json_field)
         output_path.write_text(
             json.dumps(translated_data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
