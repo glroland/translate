@@ -170,6 +170,68 @@ def _try_parse_json(s: str) -> dict | list | None:
 # Translation calls
 # ---------------------------------------------------------------------------
 
+def _translate_embedded_dict(
+    client: OpenAI, model: str, data: dict, target_lang: str, retries: int,
+) -> tuple[dict, int]:
+    """Translate string keys and string values throughout a parsed JSON dict.
+
+    All string tokens (keys and string values) are collected in DFS traversal
+    order, sent to the LLM in one batch, then used to reconstruct the dict.
+    Nested dicts are handled recursively using the same traversal.
+    Non-string, non-dict values are left unchanged.
+    """
+    tokens: list[str] = []
+
+    def _collect(d: dict) -> None:
+        for k, v in d.items():
+            tokens.append(k)          # JSON keys are always strings
+            if isinstance(v, str):
+                tokens.append(v)
+            elif isinstance(v, dict):
+                _collect(v)
+
+    _collect(data)
+
+    if not tokens:
+        return data, 0
+
+    payload = {str(i): t for i, t in enumerate(tokens)}
+    user_content = json.dumps(payload, ensure_ascii=False)
+    source_lang = _detect_source_lang(user_content) if len(user_content) >= _MIN_DETECT_LEN else None
+    system = _json_system_prompt(target_lang, source_lang)
+    expected_lang = _lang_code(target_lang)
+
+    raw, total_retries = _translate_with_retry(
+        client, model, system, user_content, expected_lang, retries, target_lang
+    )
+    raw = _strip_code_fences(raw)
+    try:
+        translated_map: dict = json.loads(raw)
+    except json.JSONDecodeError as e:
+        click.echo(f"  Warning: failed to parse embedded JSON translation: {e}", err=True)
+        click.echo(f"  Input: {user_content}", err=True)
+        click.echo(f"  Raw response: {raw[:200]}", err=True)
+        return data, total_retries
+
+    translated_tokens = [translated_map.get(str(i), tokens[i]) for i in range(len(tokens))]
+
+    idx = [0]
+
+    def _reconstruct(d: dict) -> dict:
+        out: dict = {}
+        for k, v in d.items():
+            new_key = translated_tokens[idx[0]]; idx[0] += 1
+            if isinstance(v, str):
+                new_val = translated_tokens[idx[0]]; idx[0] += 1
+                out[new_key] = new_val
+            elif isinstance(v, dict):
+                out[new_key] = _reconstruct(v)
+            else:
+                out[new_key] = v
+        return out
+
+    return _reconstruct(data), total_retries
+
 def _detect_lang(text: str) -> str | None:
     """Return ISO 639-1 code for the detected language, or None if detection fails."""
     try:
@@ -264,15 +326,24 @@ def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int
 
     total_retries = 0
 
-    # Split: values that are themselves JSON objects/arrays are translated recursively;
-    # plain strings go into the normal batching pipeline.
-    embedded = [(path, value, _try_parse_json(value)) for path, value in paths_values]
-    json_paths = [(path, value, parsed) for path, value, parsed in embedded if parsed is not None]
-    regular = [(path, value) for path, value, parsed in embedded if parsed is None]
+    # Partition: values that json.loads into a dict are translated via
+    # _translate_embedded_dict (keys + string values); everything else goes
+    # through the normal string-batching pipeline.
+    json_paths: list[tuple] = []
+    regular: list[tuple] = []
+    for path, value in paths_values:
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                json_paths.append((path, parsed))
+                continue
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+        regular.append((path, value))
 
-    for path, _, parsed in json_paths:
-        click.echo(f"  Translating embedded JSON at path {path}…", err=True)
-        translated_inner, r = translate_json(client, model, parsed, max_chars, target_lang, retries, field=None)
+    for path, parsed in json_paths:
+        click.echo(f"  Translating embedded JSON dict at path {path}…", err=True)
+        translated_inner, r = _translate_embedded_dict(client, model, parsed, target_lang, retries)
         total_retries += r
         _set_path(result, path, json.dumps(translated_inner, ensure_ascii=False))
 
