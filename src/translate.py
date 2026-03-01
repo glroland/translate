@@ -262,15 +262,26 @@ def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int
         click.echo(f"  Batch {i}/{len(batches)}…", err=True)
         payload = {str(j): value for j, (_, value) in enumerate(batch)}
         user_content = json.dumps(payload, ensure_ascii=False)
-        raw, retries_used = _translate_with_retry(client, model, system, user_content, expected_lang, retries, target_lang)
-        total_retries += retries_used
-        raw = _strip_code_fences(raw)
-        try:
-            translated_map: dict = json.loads(raw)
-        except json.JSONDecodeError as e:
-            click.echo(f"  Warning: failed to parse LLM response for batch {i}: {e}", err=True)
-            click.echo(f"  Raw response: {raw[:200]}", err=True)
+
+        translated_map: dict | None = None
+        for attempt in range(retries + 1):
+            raw, retries_used = _translate_with_retry(client, model, system, user_content, expected_lang, retries, target_lang)
+            total_retries += retries_used
+            raw = _strip_code_fences(raw)
+            try:
+                translated_map = json.loads(raw)
+                break
+            except json.JSONDecodeError as e:
+                click.echo(f"  Warning: failed to parse LLM response for batch {i}: {e}", err=True)
+                click.echo(f"  Input: {user_content}", err=True)
+                click.echo(f"  Raw response: {raw[:200]}", err=True)
+                if attempt < retries:
+                    click.echo(f"  Retrying ({attempt + 1}/{retries})…", err=True)
+
+        if translated_map is None:
+            click.echo(f"  Skipping batch {i} after {retries} retries.", err=True)
             continue
+
         for j, (path, _) in enumerate(batch):
             key = str(j)
             if key in translated_map and isinstance(translated_map[key], str):
