@@ -487,11 +487,16 @@ class TestTranslateMarkdown(unittest.TestCase):
 @patch("translate._detect_lang", return_value=None)
 class TestTranslateJsonDocling(unittest.TestCase):
 
-    def _run(self, doc, *batch_dicts, target_lang="Chinese", field="text", max_chars=4000):
-        """Run translate_json with a mock client returning *batch_dicts* in order."""
-        c = _client(*[json.dumps(b) for b in batch_dicts])
+    def _run(self, doc, *responses, target_lang="Chinese", field="text"):
+        """Run translate_json with a mock client returning *responses* in order.
+
+        Pass a plain str for each individual string translation, or a dict
+        (auto-serialised to JSON) for embedded-JSON batch calls.
+        """
+        raw = [json.dumps(r) if isinstance(r, dict) else r for r in responses]
+        c = _client(*raw)
         result, retries = translate_json(
-            c, "model", doc, max_chars=max_chars,
+            c, "model", doc, max_chars=4000,
             target_lang=target_lang, field=field,
         )
         return result, retries, c
@@ -500,53 +505,43 @@ class TestTranslateJsonDocling(unittest.TestCase):
 
     def test_single_item_english_to_simplified_chinese(self, _d):
         doc = _docling("Hello, world!")
-        result, _, _ = self._run(doc, {"0": "你好，世界！"})
+        result, _, _ = self._run(doc, "你好，世界！")
         self.assertEqual(result["texts"][0]["text"], "你好，世界！")
 
     def test_multiple_items_english_to_simplified_chinese(self, _d):
         doc = _docling("Introduction", "Body content.", "Conclusion")
-        result, _, _ = self._run(doc, {"0": "介绍", "1": "正文内容。", "2": "结论"})
+        result, _, _ = self._run(doc, "介绍", "正文内容。", "结论")
         self.assertEqual(result["texts"][0]["text"], "介绍")
         self.assertEqual(result["texts"][1]["text"], "正文内容。")
         self.assertEqual(result["texts"][2]["text"], "结论")
 
     def test_multiple_items_english_to_traditional_chinese(self, _d):
         doc = _docling("Introduction", "Body content.")
-        result, _, _ = self._run(
-            doc, {"0": "介紹", "1": "正文內容。"}, target_lang="Chinese (Traditional)"
-        )
+        result, _, _ = self._run(doc, "介紹", "正文內容。", target_lang="Chinese (Traditional)")
         self.assertEqual(result["texts"][0]["text"], "介紹")
         self.assertEqual(result["texts"][1]["text"], "正文內容。")
 
     def test_multiple_items_english_to_japanese(self, _d):
         doc = _docling("Introduction", "Body content.")
-        result, _, _ = self._run(
-            doc, {"0": "はじめに", "1": "本文の内容。"}, target_lang="Japanese"
-        )
+        result, _, _ = self._run(doc, "はじめに", "本文の内容。", target_lang="Japanese")
         self.assertEqual(result["texts"][0]["text"], "はじめに")
         self.assertEqual(result["texts"][1]["text"], "本文の内容。")
 
     def test_multiple_items_english_to_korean(self, _d):
         doc = _docling("Introduction", "Body content.")
-        result, _, _ = self._run(
-            doc, {"0": "소개", "1": "본문 내용。"}, target_lang="Korean"
-        )
+        result, _, _ = self._run(doc, "소개", "본문 내용。", target_lang="Korean")
         self.assertEqual(result["texts"][0]["text"], "소개")
         self.assertEqual(result["texts"][1]["text"], "본문 내용。")
 
     def test_multiple_items_english_to_vietnamese(self, _d):
         doc = _docling("Introduction", "Body content.")
-        result, _, _ = self._run(
-            doc, {"0": "Giới thiệu", "1": "Nội dung chính."}, target_lang="Vietnamese"
-        )
+        result, _, _ = self._run(doc, "Giới thiệu", "Nội dung chính.", target_lang="Vietnamese")
         self.assertEqual(result["texts"][0]["text"], "Giới thiệu")
         self.assertEqual(result["texts"][1]["text"], "Nội dung chính.")
 
     def test_multiple_items_english_to_thai(self, _d):
         doc = _docling("Introduction", "Body content.")
-        result, _, _ = self._run(
-            doc, {"0": "บทนำ", "1": "เนื้อหาหลัก"}, target_lang="Thai"
-        )
+        result, _, _ = self._run(doc, "บทนำ", "เนื้อหาหลัก", target_lang="Thai")
         self.assertEqual(result["texts"][0]["text"], "บทนำ")
         self.assertEqual(result["texts"][1]["text"], "เนื้อหาหลัก")
 
@@ -555,8 +550,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_simplified_chinese_to_english(self, _d):
         doc = _docling("这是测试文档。", "本文档有多个段落。")
         result, _, _ = self._run(
-            doc,
-            {"0": "This is a test document.", "1": "This document has multiple paragraphs."},
+            doc, "This is a test document.", "This document has multiple paragraphs.",
             target_lang="English",
         )
         self.assertEqual(result["texts"][0]["text"], "This is a test document.")
@@ -565,8 +559,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_traditional_chinese_to_english(self, _d):
         doc = _docling("這是測試文件。", "此文件有多個段落。")
         result, _, _ = self._run(
-            doc,
-            {"0": "This is a test document.", "1": "This document has multiple paragraphs."},
+            doc, "This is a test document.", "This document has multiple paragraphs.",
             target_lang="English",
         )
         self.assertEqual(result["texts"][0]["text"], "This is a test document.")
@@ -574,8 +567,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_japanese_to_english(self, _d):
         doc = _docling("これはテスト文書です。", "この文書には複数の段落があります。")
         result, _, _ = self._run(
-            doc,
-            {"0": "This is a test document.", "1": "This document has multiple paragraphs."},
+            doc, "This is a test document.", "This document has multiple paragraphs.",
             target_lang="English",
         )
         self.assertEqual(result["texts"][0]["text"], "This is a test document.")
@@ -583,8 +575,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_korean_to_english(self, _d):
         doc = _docling("이것은 테스트 문서입니다.", "이 문서는 여러 단락을 가지고 있습니다.")
         result, _, _ = self._run(
-            doc,
-            {"0": "This is a test document.", "1": "This document has multiple paragraphs."},
+            doc, "This is a test document.", "This document has multiple paragraphs.",
             target_lang="English",
         )
         self.assertEqual(result["texts"][0]["text"], "This is a test document.")
@@ -592,8 +583,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_vietnamese_to_english(self, _d):
         doc = _docling("Đây là tài liệu thử nghiệm.", "Tài liệu này có nhiều đoạn văn.")
         result, _, _ = self._run(
-            doc,
-            {"0": "This is a test document.", "1": "This document has multiple paragraphs."},
+            doc, "This is a test document.", "This document has multiple paragraphs.",
             target_lang="English",
         )
         self.assertEqual(result["texts"][0]["text"], "This is a test document.")
@@ -601,8 +591,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_thai_to_english(self, _d):
         doc = _docling("นี่คือเอกสารทดสอบ", "เอกสารนี้มีหลายย่อหน้า")
         result, _, _ = self._run(
-            doc,
-            {"0": "This is a test document.", "1": "This document has multiple paragraphs."},
+            doc, "This is a test document.", "This document has multiple paragraphs.",
             target_lang="English",
         )
         self.assertEqual(result["texts"][0]["text"], "This is a test document.")
@@ -611,57 +600,52 @@ class TestTranslateJsonDocling(unittest.TestCase):
 
     def test_orig_field_untouched(self, _d):
         doc = _docling("Hello, world!")
-        result, _, _ = self._run(doc, {"0": "你好，世界！"})
+        result, _, _ = self._run(doc, "你好，世界！")
         self.assertEqual(result["texts"][0]["orig"], "Hello, world!")
 
     def test_label_field_untouched(self, _d):
         doc = _docling("Hello")
-        result, _, _ = self._run(doc, {"0": "你好"})
+        result, _, _ = self._run(doc, "你好")
         self.assertEqual(result["texts"][0]["label"], "paragraph")
 
     def test_self_ref_untouched(self, _d):
         doc = _docling("Hello")
-        result, _, _ = self._run(doc, {"0": "你好"})
+        result, _, _ = self._run(doc, "你好")
         self.assertEqual(result["texts"][0]["self_ref"], "#/texts/0")
 
     def test_schema_name_untouched(self, _d):
         doc = _docling("Hello")
-        result, _, _ = self._run(doc, {"0": "你好"})
+        result, _, _ = self._run(doc, "你好")
         self.assertEqual(result["schema_name"], "DoclingDocument")
 
     def test_version_untouched(self, _d):
         doc = _docling("Hello")
-        result, _, _ = self._run(doc, {"0": "你好"})
+        result, _, _ = self._run(doc, "你好")
         self.assertEqual(result["version"], "1.9.0")
 
     def test_original_document_not_mutated(self, _d):
         doc = _docling("Hello")
         original = doc["texts"][0]["text"]
-        self._run(doc, {"0": "你好"})
+        self._run(doc, "你好")
         self.assertEqual(doc["texts"][0]["text"], original)
 
     def test_empty_text_skipped_and_preserved(self, _d):
+        """Empty text fields are not sent to the LLM; non-empty ones get one call each."""
         doc = _docling("Hello", "", "World")
-        result, _, c = self._run(doc, {"0": "你好", "1": "世界"})
-        # Only 2 items should reach the LLM
-        payload = json.loads(
-            c.chat.completions.create.call_args_list[0].kwargs["messages"][1]["content"]
-        )
-        self.assertEqual(len(payload), 2)
-        # Empty slot preserved as-is
+        result, _, c = self._run(doc, "你好", "世界")
+        self.assertEqual(c.chat.completions.create.call_count, 2)
         self.assertEqual(result["texts"][1]["text"], "")
         self.assertEqual(result["texts"][0]["text"], "你好")
         self.assertEqual(result["texts"][2]["text"], "世界")
 
-    def test_batching_with_small_chunk_size(self, _d):
-        """max_chars=5 forces each item into its own batch → two LLM calls."""
-        doc = _docling("Hello", "World")
-        result, _, c = self._run(
-            doc, {"0": "你好"}, {"0": "世界"}, max_chars=5
-        )
-        self.assertEqual(c.chat.completions.create.call_count, 2)
+    def test_each_string_gets_own_llm_call(self, _d):
+        """Every non-empty text field triggers exactly one individual LLM call."""
+        doc = _docling("Hello", "World", "Goodbye")
+        result, _, c = self._run(doc, "你好", "世界", "再见")
+        self.assertEqual(c.chat.completions.create.call_count, 3)
         self.assertEqual(result["texts"][0]["text"], "你好")
         self.assertEqual(result["texts"][1]["text"], "世界")
+        self.assertEqual(result["texts"][2]["text"], "再见")
 
     def test_custom_field_name(self, _d):
         """--json-field=label translates label values, leaves text untouched."""
@@ -671,9 +655,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
                 {"label": "Submit",     "text": "do not touch"},
             ]
         }
-        result, _, _ = self._run(
-            doc, {"0": "点击这里", "1": "提交"}, field="label"
-        )
+        result, _, _ = self._run(doc, "点击这里", "提交", field="label")
         self.assertEqual(result["items"][0]["label"], "点击这里")
         self.assertEqual(result["items"][1]["label"], "提交")
         self.assertEqual(result["items"][0]["text"], "do not touch")
@@ -683,7 +665,8 @@ class TestTranslateJsonDocling(unittest.TestCase):
 
     def test_table_cell_text_translated_english_to_chinese(self, _d):
         doc = _docling_with_table("Name", "Age", row_texts=["Alice", "Engineer"])
-        result, _, _ = self._run(doc, {"0": "姓名", "1": "年龄", "2": "爱丽丝", "3": "工程师"})
+        result, _, c = self._run(doc, "姓名", "年龄", "爱丽丝", "工程师")
+        self.assertEqual(c.chat.completions.create.call_count, 4)
         cells = result["tables"][0]["data"]["table_cells"]
         translated = {c["text"] for c in cells}
         self.assertEqual(translated, {"姓名", "年龄", "爱丽丝", "工程师"})
@@ -691,9 +674,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_table_cell_text_translated_japanese_to_english(self, _d):
         doc = _docling_with_table("名前", "年齢", row_texts=["田中", "エンジニア"])
         result, _, _ = self._run(
-            doc,
-            {"0": "Name", "1": "Age", "2": "Tanaka", "3": "Engineer"},
-            target_lang="English",
+            doc, "Name", "Age", "Tanaka", "Engineer", target_lang="English",
         )
         cells = result["tables"][0]["data"]["table_cells"]
         translated = {c["text"] for c in cells}
@@ -702,9 +683,7 @@ class TestTranslateJsonDocling(unittest.TestCase):
     def test_table_cell_text_translated_korean_to_english(self, _d):
         doc = _docling_with_table("이름", "직업", row_texts=["김민준", "개발자"])
         result, _, _ = self._run(
-            doc,
-            {"0": "Name", "1": "Occupation", "2": "Kim Minjun", "3": "Developer"},
-            target_lang="English",
+            doc, "Name", "Occupation", "Kim Minjun", "Developer", target_lang="English",
         )
         cells = result["tables"][0]["data"]["table_cells"]
         translated = {c["text"] for c in cells}
@@ -712,6 +691,8 @@ class TestTranslateJsonDocling(unittest.TestCase):
         self.assertIn("Developer", translated)
 
     # --- Embedded JSON in text field ---
+    # _translate_embedded_dict still sends a JSON batch internally, so these
+    # tests pass dicts as the mock response (auto-serialised by _run).
 
     def test_embedded_json_object_translated_to_chinese(self, _d):
         """A 'text' value that is itself a JSON dict: both keys and string values
@@ -766,10 +747,10 @@ class TestTranslateJsonDocling(unittest.TestCase):
         """One plain text item and one embedded-JSON item in the same document."""
         inner = {"title": "Intro"}
         doc = _docling("Plain paragraph", json.dumps(inner))
-        # Embedded JSON processed first: tokens ["title"(0), "Intro"(1)]
-        # → response {"0": "标题", "1": "你好"}  → {"标题": "你好"}
-        # Then plain-text batch: {"0": "Plain paragraph"} → {"0": "普通段落"}
-        result, _, c = self._run(doc, {"0": "标题", "1": "你好"}, {"0": "普通段落"})
+        # Embedded JSON processed first (dict response): tokens ["title"(0), "Intro"(1)]
+        # → {"标题": "你好"}
+        # Then the plain string gets its own individual call (plain str response).
+        result, _, c = self._run(doc, {"0": "标题", "1": "你好"}, "普通段落")
         self.assertEqual(c.chat.completions.create.call_count, 2)
         translated_inner = json.loads(result["texts"][1]["text"])
         self.assertEqual(translated_inner["标题"], "你好")
