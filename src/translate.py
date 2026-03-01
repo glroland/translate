@@ -7,7 +7,10 @@ import re
 from pathlib import Path
 
 import click
+from langdetect import detect, LangDetectException
 from openai import OpenAI
+
+_MIN_DETECT_LEN = 30  # langdetect is unreliable below this many characters
 
 def _markdown_system_prompt(target_lang: str) -> str:
     return (
@@ -150,6 +153,14 @@ def _strip_code_fences(text: str) -> str:
 # Translation calls
 # ---------------------------------------------------------------------------
 
+def _detect_lang(text: str) -> str | None:
+    """Return ISO 639-1 code for the detected language, or None if detection fails."""
+    try:
+        return detect(text)
+    except LangDetectException:
+        return None
+
+
 def _translate_chunk(client: OpenAI, model: str, system: str, chunk: str) -> str:
     response = client.chat.completions.create(
         model=model,
@@ -162,40 +173,83 @@ def _translate_chunk(client: OpenAI, model: str, system: str, chunk: str) -> str
     return response.choices[0].message.content or ""
 
 
-def translate_markdown(client: OpenAI, model: str, content: str, max_chars: int, target_lang: str) -> str:
+def _translate_with_retry(
+    client: OpenAI, model: str, system: str, chunk: str,
+    expected_lang: str, max_retries: int,
+) -> tuple[str, int]:
+    """Translate a chunk, retrying up to max_retries times if the result is in the wrong language.
+
+    Returns (translated_text, retries_used).
+    """
+    result = _translate_chunk(client, model, system, chunk)
+    retries_used = 0
+
+    for attempt in range(max_retries):
+        if len(result.strip()) < _MIN_DETECT_LEN:
+            break
+        detected = _detect_lang(result)
+        if detected is None or detected == expected_lang:
+            break
+        click.echo(
+            f"  Language detected as '{detected}', expected '{expected_lang}';"
+            f" retrying ({attempt + 1}/{max_retries})…",
+            err=True,
+        )
+        result = _translate_chunk(client, model, system, chunk)
+        retries_used += 1
+    else:
+        # All retries exhausted — warn if the final result is still wrong
+        detected = _detect_lang(result)
+        if detected and detected != expected_lang:
+            click.echo(
+                f"  Warning: translation still detected as '{detected}'"
+                f" after {max_retries} retries.",
+                err=True,
+            )
+
+    return result, retries_used
+
+
+def translate_markdown(client: OpenAI, model: str, content: str, max_chars: int, target_lang: str, retries: int = 0) -> tuple[str, int]:
     chunks = split_markdown(content, max_chars)
     translated: list[str] = []
     system = _markdown_system_prompt(target_lang)
+    expected_lang = _lang_code(target_lang)
+    total_retries = 0
     for i, chunk in enumerate(chunks, 1):
         click.echo(f"  Translating chunk {i}/{len(chunks)} ({len(chunk)} chars)…", err=True)
-        result = _translate_chunk(client, model, system, chunk)
+        result, retries_used = _translate_with_retry(client, model, system, chunk, expected_lang, retries)
+        total_retries += retries_used
         translated.append(result.strip())
 
     if not translated:
-        return ""
+        return "", total_retries
 
     joined = translated[0]
     for part in translated[1:]:
         joined = _ensure_spacing(joined, part)
-    return joined
+    return joined, total_retries
 
 
-def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int, target_lang: str) -> dict | list:
+def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int, target_lang: str, retries: int = 0) -> tuple[dict | list, int]:
     result = copy.deepcopy(data)
     paths_values = list(_collect_paths(result))
 
     if not paths_values:
-        return result
+        return result, 0
 
     batches = _batch_paths(paths_values, max_chars)
     system = _json_system_prompt(target_lang)
+    expected_lang = _lang_code(target_lang)
+    total_retries = 0
     click.echo(f"  Translating {len(paths_values)} strings in {len(batches)} batch(es)…", err=True)
 
     for i, batch in enumerate(batches, 1):
         click.echo(f"  Batch {i}/{len(batches)}…", err=True)
         payload = {str(j): value for j, (_, value) in enumerate(batch)}
         user_content = json.dumps(payload, ensure_ascii=False)
-        raw = _translate_chunk(client, model, system, user_content)
+        raw, retries_used = _translate_with_retry(client, model, system, user_content, expected_lang, retries)
+        total_retries += retries_used
         raw = _strip_code_fences(raw)
         try:
             translated_map: dict = json.loads(raw)
@@ -208,7 +262,7 @@ def translate_json(client: OpenAI, model: str, data: dict | list, max_chars: int
             if key in translated_map and isinstance(translated_map[key], str):
                 _set_path(result, path, translated_map[key])
 
-    return result
+    return result, total_retries
 
 
 # ISO 639-1 codes for common languages; fallback is first two letters lowercased.
@@ -254,7 +308,8 @@ def _default_output(input_path: Path, target_lang: str) -> Path:
 @click.option("--model", required=True, help="Model name (e.g. ministral-3b-2410).")
 @click.option("--chunk-size", default=2000, show_default=True, metavar="N", help="Max characters per chunk.")
 @click.option("--target-lang", default="English", show_default=True, help="Target language for translation.")
-def main(input, output, url, key, model, chunk_size, target_lang):
+@click.option("--retries", default=2, show_default=True, metavar="N", help="Max retries when translated chunk is detected in the wrong language.")
+def main(input, output, url, key, model, chunk_size, target_lang, retries):
     """Translate a Markdown or JSON file via an OpenAI-compatible LLM."""
     input_path = Path(input)
     output_path = Path(output) if output else _default_output(input_path, target_lang)
@@ -271,18 +326,19 @@ def main(input, output, url, key, model, chunk_size, target_lang):
     if suffix in {".md", ".markdown"}:
         content = input_path.read_text(encoding="utf-8")
         click.echo(f"Translating markdown: {input_path} ({len(content)} chars) → {target_lang}", err=True)
-        translated = translate_markdown(client, model, content, chunk_size, target_lang)
+        translated, total_retries = translate_markdown(client, model, content, chunk_size, target_lang, retries)
         output_path.write_text(translated + "\n", encoding="utf-8")
     else:
         content = input_path.read_text(encoding="utf-8")
         click.echo(f"Translating JSON: {input_path} → {target_lang}", err=True)
         data = json.loads(content)
-        translated_data = translate_json(client, model, data, chunk_size, target_lang)
+        translated_data, total_retries = translate_json(client, model, data, chunk_size, target_lang, retries)
         output_path.write_text(
             json.dumps(translated_data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
 
+    click.echo(f"Retries: {total_retries}", err=True)
     click.echo(f"Done. Output written to: {output_path}", err=True)
 
 
